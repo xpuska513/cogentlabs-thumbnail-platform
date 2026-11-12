@@ -1,0 +1,59 @@
+{{- if .Values.prober.enabled }}
+{{- $selector := dict "root" . "component" "prober" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-prober
+  labels:
+    {{- include "thumbnail.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prober
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "thumbnail.selectorLabels" $selector | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "thumbnail.selectorLabels" $selector | nindent 8 }}
+      annotations:
+        checksum/scripts: {{ include (print $.Template.BasePath "/scripts.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- include "thumbnail.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: prober
+          image: {{ .Values.prober.image }}
+          command: ["node", "/prober/prober.js"]
+          env:
+            - name: PROBE_TARGET
+              value: {{ .Values.prober.target }}
+            - name: PROBE_INTERVAL_SECONDS
+              value: {{ .Values.prober.intervalSeconds | quote }}
+            - name: PROBE_TIMEOUT_SECONDS
+              value: {{ .Values.prober.timeoutSeconds | quote }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 96Mi }
+          securityContext:
+            {{- include "thumbnail.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /prober
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ .Release.Name }}-scripts
+{{- end }}

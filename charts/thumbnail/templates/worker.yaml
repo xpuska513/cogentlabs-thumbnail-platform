@@ -1,0 +1,72 @@
+{{- $selector := dict "root" . "component" "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    {{- include "thumbnail.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "thumbnail.selectorLabels" $selector | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "thumbnail.selectorLabels" $selector | nindent 8 }}
+      annotations:
+        checksum/scripts: {{ include (print $.Template.BasePath "/scripts.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- include "thumbnail.podSecurityContext" . | nindent 8 }}
+      {{- include "thumbnail.spread" $selector | nindent 6 }}
+      # The worker ignores SIGTERM too. A job still running when the pod is
+      # killed is picked up again after Agenda's 10-minute lock expires.
+      terminationGracePeriodSeconds: 15
+      initContainers:
+        {{- include "thumbnail.initContainers" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "thumbnail.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/index.js"]
+          env:
+            - name: SERVER_TYPE
+              value: worker
+            {{- include "thumbnail.connectionEnv" . | nindent 12 }}
+            {{- /* Metrics only: the worker's traces are fragments (no span per job). */}}
+            {{- include "thumbnail.otelEnv" (dict "root" . "service" "thumbnail-worker" "traces" false) | nindent 12 }}
+          {{- if .Values.otel.enabled }}
+          ports:
+            - name: metrics
+              containerPort: 9464
+          {{- end }}
+          # No probes: the worker has no health endpoint. Its health is measured
+          # end to end by the prober.
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- include "thumbnail.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- include "thumbnail.appVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "thumbnail.volumes" . | nindent 8 }}
+{{- if gt (int .Values.worker.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    {{- include "thumbnail.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "thumbnail.selectorLabels" $selector | nindent 6 }}
+{{- end }}

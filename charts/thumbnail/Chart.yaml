@@ -1,0 +1,6 @@
+apiVersion: v2
+name: thumbnail
+description: Thumbnail generator API and worker, with their gateway route, monitoring and a synthetic prober.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

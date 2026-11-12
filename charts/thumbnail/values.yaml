@@ -1,0 +1,71 @@
+image:
+  repository: thumbnail-generator
+  # Set by `make deploy` to the git tree hash of app/.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    # Uploads are buffered in memory by the app (no size limit of its own);
+    # the gateway caps them at gateway.envoyUploadLimit.
+    limits: { memory: 384Mi }
+
+worker:
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    # Agenda resizes 5 images at once per worker; 12-megapixel images peaked
+    # at 361 MiB in testing.
+    limits: { memory: 768Mi }
+
+# Connection settings. Credentials are read from an existing Secret, so the
+# same chart works with in-cluster dependencies, S3 or a managed MongoDB.
+mongodb:
+  secretName: thumbnail-credentials
+  urlKey: mongo-url
+minio:
+  endpoint: minio
+  port: 9000
+  useSSL: false
+  secretName: thumbnail-credentials
+  accessKeyKey: minio-root-user
+  secretKeyKey: minio-root-password
+
+gateway:
+  enabled: true
+  parentRef:
+    name: public
+    namespace: envoy-gateway-system
+  hostnames: []
+  # Without it, a request hangs for 30 s when MongoDB is down; with it the
+  # client gets a 504, which also counts against the availability indicator.
+  requestTimeout: 10s
+  # Envoy Gateway only (BackendTrafficPolicy): bigger uploads get a 413.
+  # Set to "" for other Gateway API implementations.
+  envoyUploadLimit: 10Mi
+
+# OpenTelemetry auto-instrumentation, injected the way the OpenTelemetry
+# operator does it: an init container copies the SDK into a shared volume and
+# NODE_OPTIONS preloads it. 0.78.0 is the last image that supports Node 20.
+otel:
+  enabled: true
+  image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:0.78.0
+  tracesEndpoint: http://jaeger.monitoring:4318
+
+# Uploads a test image through the gateway every interval and checks the
+# thumbnail comes back. The main reliability indicator.
+prober:
+  enabled: true
+  image: node:24.22.1-alpine3.24
+  target: http://envoy-public.envoy-gateway-system
+  intervalSeconds: 30
+  timeoutSeconds: 30
+
+# PodMonitor, alert rules and the Grafana dashboard (needs the Prometheus
+# Operator CRDs).
+monitoring:
+  enabled: true
+  # Base of the runbook links in alerts; point it at the hosted repo.
+  runbookUrl: docs/runbooks.md
