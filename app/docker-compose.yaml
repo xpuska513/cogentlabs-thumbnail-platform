@@ -1,0 +1,37 @@
+version: "3.8"
+services:
+  api:
+    image: thumbnail-api
+    build: .
+    ports:
+      - "3000:3000"
+    environment: 
+      SERVER_TYPE: server
+    env_file: local.env
+    depends_on: 
+      - db
+      - s3
+  task:
+    image: thumbnail-task
+    build: .
+    environment: 
+      SERVER_TYPE: worker
+    env_file: local.env
+    depends_on: 
+      - db
+      - s3
+  db:
+    image: mongo:8.0.34
+    volumes:
+      - ./data/database:/data/db
+    ports:
+      - 27017:27017
+    restart: unless-stopped
+  s3:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data/minio:/data
+    env_file: local.env
+    command: server /data
