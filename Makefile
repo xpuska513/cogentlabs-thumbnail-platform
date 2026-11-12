@@ -12,9 +12,10 @@ ENVOY_GATEWAY_VERSION         := v1.9.3
 KUBE_PROMETHEUS_STACK_VERSION := 92.14.1
 # Must match the operator version inside kube-prometheus-stack (v0.94.2).
 PROMETHEUS_OPERATOR_CRDS_VERSION := 32.0.2
+MONGODB_EXPORTER_VERSION := 3.23.0
 
 .DEFAULT_GOAL := help
-.PHONY: help cluster platform namespaces monitoring tracing gateway down
+.PHONY: help cluster platform namespaces monitoring tracing gateway deps down
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -48,6 +49,13 @@ gateway: ## Envoy Gateway and the shared public Gateway
 	  -n envoy-gateway-system --create-namespace -f deploy/values/envoy-gateway.yaml --wait --timeout 5m
 	$(KUBECTL) apply -f deploy/manifests/gateway.yaml
 	$(KUBECTL) wait --for=condition=Programmed gateway/public -n envoy-gateway-system --timeout=180s
+
+deps: ## MongoDB and MinIO (dev stand-ins for managed services), Mongo exporter
+	$(KUBECTL) apply -f deploy/manifests/mongodb.yaml -f deploy/manifests/minio.yaml
+	$(KUBECTL) rollout status statefulset/mongodb -n $(NAMESPACE) --timeout=180s
+	$(KUBECTL) rollout status statefulset/minio -n $(NAMESPACE) --timeout=180s
+	$(HELM) upgrade --install mongodb-exporter oci://ghcr.io/prometheus-community/charts/prometheus-mongodb-exporter \
+	  --version $(MONGODB_EXPORTER_VERSION) -n $(NAMESPACE) -f deploy/values/mongodb-exporter.yaml --wait --timeout 3m
 
 down: ## Delete the cluster and everything in it
 	kind delete cluster --name $(CLUSTER)

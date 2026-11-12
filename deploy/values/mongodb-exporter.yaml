@@ -1,0 +1,15 @@
+# Percona MongoDB exporter. Connects as the monitoring-only `exporter` user.
+existingSecret:
+  name: thumbnail-credentials
+  key: mongo-exporter-uri
+
+serviceMonitor:
+  enabled: true
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits: { memory: 128Mi }
