@@ -130,16 +130,18 @@ spec:
             runbook_url: {{ $runbook }}#thumbnailcontaineroomkilled
 
         # --- Dependencies -----------------------------------------------------
+        # absent(... == 1) rather than == 0: when a pod is gone (scaled to zero,
+        # node lost) its scrape target disappears and there is no series at all.
         - alert: ThumbnailMongoDown
-          expr: mongodb_up{namespace="{{ .Release.Namespace }}"} == 0
+          expr: absent(mongodb_up{namespace="{{ .Release.Namespace }}"} == 1)
           for: 1m
           labels:
             severity: critical
           annotations:
-            summary: MongoDB is unreachable; the API crashes on its next database call
+            summary: MongoDB is unreachable (or its exporter is down); the API crashes on its next database call
             runbook_url: {{ $runbook }}#thumbnailmongodown
         - alert: ThumbnailMinioDown
-          expr: up{namespace="{{ .Release.Namespace }}", job="minio"} == 0
+          expr: absent(up{namespace="{{ .Release.Namespace }}", job="minio"} == 1)
           for: 1m
           labels:
             severity: critical
