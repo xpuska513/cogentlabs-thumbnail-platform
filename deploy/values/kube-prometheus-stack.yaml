@@ -24,6 +24,9 @@ defaultRules:
     kubeSchedulerAlerting: false
     kubeSchedulerRecording: false
     windows: false
+  disabled:
+    # kind nodes are containers without NTP of their own; the host keeps time.
+    NodeClockNotSynchronising: true
 windowsMonitoring:
   enabled: false
 
@@ -65,9 +68,10 @@ grafana:
       uid: jaeger
       url: http://jaeger.monitoring:16686
       access: proxy
+  # Measured peak 376Mi while loading dashboards (384Mi got OOM-killed).
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 384Mi }
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: 768Mi }
 
 prometheusOperator:
   resources:

@@ -1,0 +1,159 @@
+{{- if .Values.monitoring.enabled }}
+{{- $runbook := .Values.monitoring.runbookUrl -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "thumbnail.labels" . | nindent 4 }}
+spec:
+  groups:
+    # The reliability indicators. Each is a ratio of good events to all events.
+    - name: thumbnail.slis
+      rules:
+        # End to end: share of prober runs whose thumbnail came back (target 99%).
+        - record: thumbnail:probe_success:ratio_rate5m
+          expr: |
+            sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}", result="success"}[5m]))
+            / sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}"}[5m]))
+        # End to end latency: share of prober runs done within 10 s (target 95%).
+        # Prometheus 3 stores bucket bounds as floats ("10.0"), older versions as exposed.
+        - record: thumbnail:probe_fast:ratio_rate15m
+          expr: |
+            sum(rate(thumbnail_probe_duration_seconds_bucket{namespace="{{ .Release.Namespace }}", le=~"10|10.0"}[15m]))
+            / sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}"}[15m]))
+        - record: thumbnail:probe_duration_seconds:p95_rate15m
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(thumbnail_probe_duration_seconds_bucket{namespace="{{ .Release.Namespace }}"}[15m])))
+        # Availability at the edge: share of requests on the public listener
+        # without a 5xx, including errors Envoy generates itself (no healthy
+        # backend, timeouts). Target 99.5%. The app answers every error with a
+        # 400, so 4xx can't be told apart from client mistakes and is excluded.
+        - record: thumbnail:edge_availability:ratio_rate5m
+          expr: |
+            1 - (
+              sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="http-10080", envoy_response_code_class="5"}[5m]))
+              / sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix="http-10080"}[5m]))
+            )
+        - record: thumbnail:edge_availability:ratio_rate1h
+          expr: |
+            1 - (
+              sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="http-10080", envoy_response_code_class="5"}[1h]))
+              / sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix="http-10080"}[1h]))
+            )
+        # API latency: share of /thumbnail requests answered within 500 ms
+        # (target 95%), measured in the app per route. Probes (/) are excluded.
+        - record: thumbnail:api_fast:ratio_rate5m
+          expr: |
+            sum(rate(http_server_request_duration_bucket{namespace="{{ .Release.Namespace }}", component="api", http_route=~"/thumbnail.*", le="0.5"}[5m]))
+            / sum(rate(http_server_request_duration_count{namespace="{{ .Release.Namespace }}", component="api", http_route=~"/thumbnail.*"}[5m]))
+        - record: thumbnail:api_latency_seconds:p95_rate5m
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket{namespace="{{ .Release.Namespace }}", component="api", http_route=~"/thumbnail.*"}[5m])))
+
+    - name: thumbnail.alerts
+      rules:
+        # --- End to end -----------------------------------------------------
+        - alert: ThumbnailProbeFailing
+          expr: |
+            sum by (result) (increase(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}", result!="success"}[5m])) >= 3
+          labels:
+            severity: critical
+          annotations:
+            summary: Thumbnails are not being produced (prober failing at {{ "{{ $labels.result }}" }})
+            description: The synthetic upload failed {{ "{{ $value | printf \"%.0f\" }}" }} times in 5 minutes at the {{ "{{ $labels.result }}" }} stage.
+            runbook_url: {{ $runbook }}#thumbnailprobefailing
+        - alert: ThumbnailProbeSlow
+          expr: thumbnail:probe_duration_seconds:p95_rate15m > 10
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Thumbnails take longer than 10 s (p95 {{ "{{ $value | humanizeDuration }}" }})
+            runbook_url: {{ $runbook }}#thumbnailprobeslow
+        - alert: ThumbnailProberDown
+          expr: absent(up{namespace="{{ .Release.Namespace }}", component="prober"} == 1)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The synthetic prober is not reporting, so end-to-end failures would go unnoticed
+            runbook_url: {{ $runbook }}#thumbnailproberdown
+
+        # --- Edge and API ---------------------------------------------------
+        # Fast burn of the 99.5% availability target: at 14.4x the allowed error
+        # rate, 2% of a 30-day budget is gone in an hour. Both windows must
+        # agree, so a short blip doesn't page and the alert clears quickly.
+        - alert: ThumbnailApiErrorBudgetBurn
+          expr: |
+            (1 - thumbnail:edge_availability:ratio_rate5m) > (14.4 * 0.005)
+            and
+            (1 - thumbnail:edge_availability:ratio_rate1h) > (14.4 * 0.005)
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ "{{ $value | humanizePercentage }}" }} of requests at the gateway fail with a 5xx"
+            runbook_url: {{ $runbook }}#thumbnailapierrorbudgetburn
+        - alert: ThumbnailApiSlow
+          expr: thumbnail:api_latency_seconds:p95_rate5m > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: API p95 latency is {{ "{{ $value | humanizeDuration }}" }} (target under 500 ms)
+            runbook_url: {{ $runbook }}#thumbnailapislow
+        # The app hides these: the API answers 200 before the upload is stored,
+        # and the worker marks a job complete even if saving the thumbnail failed.
+        - alert: ThumbnailStorageWritesFailing
+          expr: |
+            sum by (component) (increase(http_client_request_duration_count{namespace="{{ .Release.Namespace }}", server_address="{{ .Values.minio.endpoint }}", http_request_method="PUT", error_type!=""}[5m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Writes to object storage are failing from the {{ "{{ $labels.component }}" }}
+            description: >-
+              The {{ "{{ $labels.component }}" }} failed {{ "{{ $value | printf \"%.0f\" }}" }} uploads to MinIO in 5 minutes.
+              From the API this means uploads were accepted (200) but not stored;
+              from the worker, jobs were marked complete without a thumbnail.
+            runbook_url: {{ $runbook }}#thumbnailstoragewritesfailing
+
+        # --- Pods -------------------------------------------------------------
+        - alert: ThumbnailContainerOOMKilled
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+            and on (namespace, pod, container)
+            kube_pod_container_status_last_terminated_reason{namespace="{{ .Release.Namespace }}", reason="OOMKilled"} == 1
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{ $labels.pod }}" }} ({{ "{{ $labels.container }}" }}) was killed for running out of memory"
+            runbook_url: {{ $runbook }}#thumbnailcontaineroomkilled
+
+        # --- Dependencies -----------------------------------------------------
+        - alert: ThumbnailMongoDown
+          expr: mongodb_up{namespace="{{ .Release.Namespace }}"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: MongoDB is unreachable; the API crashes on its next database call
+            runbook_url: {{ $runbook }}#thumbnailmongodown
+        - alert: ThumbnailMinioDown
+          expr: up{namespace="{{ .Release.Namespace }}", job="minio"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: MinIO is unreachable; uploads are accepted but not stored
+            runbook_url: {{ $runbook }}#thumbnailminiodown
+        - alert: ThumbnailStorageLow
+          expr: |
+            min(minio_cluster_capacity_usable_free_bytes{namespace="{{ .Release.Namespace }}"}
+              / minio_cluster_capacity_usable_total_bytes{namespace="{{ .Release.Namespace }}"}) < 0.2
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: MinIO has {{ "{{ $value | humanizePercentage }}" }} free space left; the app never deletes files
+            runbook_url: {{ $runbook }}#thumbnailstoragelow
+{{- end }}
