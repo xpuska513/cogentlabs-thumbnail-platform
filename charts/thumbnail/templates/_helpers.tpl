@@ -151,12 +151,19 @@ capabilities:
   drop: [ALL]
 {{- end }}
 
-{{/* Spread replicas over nodes when possible, without blocking scheduling. */}}
+{{/*
+Spread replicas over nodes when possible, without blocking scheduling.
+pod-template-hash: count only pods of the same revision, otherwise a rolling
+update balances new pods against old ones and can stack them on one node.
+Honor: tainted nodes (the kind control plane) don't count as empty domains.
+*/}}
 {{- define "thumbnail.spread" -}}
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: kubernetes.io/hostname
     whenUnsatisfiable: ScheduleAnyway
+    nodeTaintsPolicy: Honor
+    matchLabelKeys: [pod-template-hash]
     labelSelector:
       matchLabels:
         {{- include "thumbnail.selectorLabels" . | nindent 8 }}

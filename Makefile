@@ -24,7 +24,8 @@ TAG ?= $(shell git rev-parse --short HEAD:app 2>/dev/null || echo dev)$(shell gi
 HELM_UPGRADE_FLAGS := --wait $(shell helm version --short 2>/dev/null | grep -q '^v3' && echo --atomic || echo --rollback-on-failure --force-conflicts)
 
 .DEFAULT_GOAL := help
-.PHONY: help up cluster platform namespaces monitoring tracing gateway deps build deploy rollback test down
+.PHONY: help up cluster platform namespaces monitoring tracing gateway deps build deploy rollback test \
+	status alerts grafana prometheus alertmanager jaeger down
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -81,6 +82,29 @@ rollback: ## Roll the app back to its previous release
 
 test: ## Smoke test through the gateway: upload, wait, download, check
 	scripts/smoke-test.sh http://localhost:8080
+
+status: ## Show the app's pods and every Helm release
+	$(KUBECTL) get pods -n $(NAMESPACE) -o wide
+	@$(HELM) list -A
+
+alerts: ## List firing alerts
+	@$(KUBECTL) exec -n monitoring prometheus-kps-prometheus-0 -c prometheus -- \
+	  promtool query instant http://localhost:9090 'sort_desc(ALERTS{alertstate="firing"})' \
+	  | sed -E 's/^ALERTS\{(.*)\} => .*/\1/; s/alertstate="firing",? ?//'
+
+grafana: ## Grafana on http://localhost:3000 (prints the admin password)
+	@echo "user admin, password $$($(KUBECTL) get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode)"
+	@echo "dashboard: http://localhost:3000/d/thumbnail"
+	$(KUBECTL) port-forward -n monitoring svc/kps-grafana 3000:80
+
+prometheus: ## Prometheus on http://localhost:9090
+	$(KUBECTL) port-forward -n monitoring svc/kps-prometheus 9090:9090
+
+alertmanager: ## Alertmanager on http://localhost:9093
+	$(KUBECTL) port-forward -n monitoring svc/kps-alertmanager 9093:9093
+
+jaeger: ## Jaeger on http://localhost:16686
+	$(KUBECTL) port-forward -n monitoring svc/jaeger 16686:16686
 
 down: ## Delete the cluster and everything in it
 	kind delete cluster --name $(CLUSTER)
