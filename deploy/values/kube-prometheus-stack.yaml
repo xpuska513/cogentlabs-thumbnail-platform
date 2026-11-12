@@ -1,0 +1,85 @@
+# kube-prometheus-stack, trimmed for a kind cluster.
+fullnameOverride: kps
+
+# CRDs are applied separately by `make monitoring` (Helm never upgrades CRDs),
+# so chart upgrades and CRD upgrades are both explicit and repeatable.
+crds:
+  enabled: false
+
+# kind runs etcd, the scheduler, the controller manager and kube-proxy bound to
+# localhost, so they can't be scraped. Their targets and rules would only be noise.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false
+windowsMonitoring:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    # Pick up ServiceMonitors, PodMonitors and rules from every namespace,
+    # so each component ships its own monitoring next to it.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { memory: 1Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 5Gi
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+
+grafana:
+  admin:
+    existingSecret: grafana-admin
+  grafana.ini:
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+  additionalDataSources:
+    - name: Jaeger
+      type: jaeger
+      uid: jaeger
+      url: http://jaeger.monitoring:16686
+      access: proxy
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { memory: 64Mi }

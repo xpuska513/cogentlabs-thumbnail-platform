@@ -1,0 +1,10 @@
+# Envoy Gateway controller.
+# CRDs are applied separately by `make gateway` (standard Gateway API channel).
+crds:
+  enabled: false
+
+deployment:
+  envoyGateway:
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { memory: 512Mi }
