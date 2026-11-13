@@ -104,8 +104,14 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: minio
+  # Two paths on one port. Without a label telling them apart, both scrapes
+  # write the same `up` series and its value flaps if only one of them fails.
   endpoints:
     - port: s3
       path: /minio/v2/metrics/cluster
+      relabelings:
+        - { targetLabel: metrics, replacement: cluster }
     - port: s3
       path: /minio/v2/metrics/bucket
+      relabelings:
+        - { targetLabel: metrics, replacement: bucket }

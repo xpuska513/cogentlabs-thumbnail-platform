@@ -17,7 +17,7 @@ spec:
       labels:
         {{- include "thumbnail.selectorLabels" $selector | nindent 8 }}
       annotations:
-        checksum/scripts: {{ include (print $.Template.BasePath "/scripts.yaml") . | sha256sum }}
+        checksum/scripts: {{ include "thumbnail.scriptsChecksum" . }}
     spec:
       securityContext:
         {{- include "thumbnail.podSecurityContext" . | nindent 8 }}

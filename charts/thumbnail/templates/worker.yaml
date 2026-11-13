@@ -20,7 +20,7 @@ spec:
       labels:
         {{- include "thumbnail.selectorLabels" $selector | nindent 8 }}
       annotations:
-        checksum/scripts: {{ include (print $.Template.BasePath "/scripts.yaml") . | sha256sum }}
+        checksum/scripts: {{ include "thumbnail.scriptsChecksum" . }}
     spec:
       securityContext:
         {{- include "thumbnail.podSecurityContext" . | nindent 8 }}
@@ -66,6 +66,9 @@ metadata:
     {{- include "thumbnail.labels" . | nindent 4 }}
 spec:
   minAvailable: 1
+  # A pod that isn't ready (crash-looping) can still be evicted, so it doesn't
+  # block a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "thumbnail.selectorLabels" $selector | nindent 6 }}

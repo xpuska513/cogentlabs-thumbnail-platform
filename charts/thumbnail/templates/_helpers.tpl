@@ -15,7 +15,13 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
 {{- define "thumbnail.image" -}}
-{{ .Values.image.repository }}:{{ required "image.tag is required (make deploy sets it)" .Values.image.tag }}
+{{ printf "%s:%s" .Values.image.repository (required "image.tag is required (make deploy sets it)" .Values.image.tag) | quote }}
+{{- end }}
+
+{{/* Restarts pods when the scripts change. A hash of the rendered ConfigMap
+     would also change with every image tag, which is one of its labels. */}}
+{{- define "thumbnail.scriptsChecksum" -}}
+{{ print (.Files.Get "files/wait-for-deps.js") (.Files.Get "files/prober.js") (.Files.Get "files/probe.png") | sha256sum }}
 {{- end }}
 
 {{/* Connection settings shared by the app containers and the init check. */}}

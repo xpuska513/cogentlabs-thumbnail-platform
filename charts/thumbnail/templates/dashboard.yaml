@@ -8,6 +8,7 @@ metadata:
     {{- include "thumbnail.labels" . | nindent 4 }}
     grafana_dashboard: "1"
 data:
+  # The queries in the file use namespace="thumbnail"; point them at this release's.
   thumbnail.json: |
-    {{- .Files.Get "files/dashboard.json" | nindent 4 }}
+    {{- .Files.Get "files/dashboard.json" | replace "namespace=\\\"thumbnail\\\"" (printf "namespace=\\\"%s\\\"" .Release.Namespace) | nindent 4 }}
 {{- end }}

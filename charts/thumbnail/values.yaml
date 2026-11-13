@@ -67,5 +67,5 @@ prober:
 # Operator CRDs).
 monitoring:
   enabled: true
-  # Base of the runbook links in alerts; point it at the hosted repo.
-  runbookUrl: docs/runbooks.md
+  # Base of the runbook links in alerts.
+  runbookUrl: https://github.com/xpuska513/cogentlabs-thumbnail-platform/blob/main/docs/runbooks.md
