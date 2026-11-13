@@ -10,6 +10,6 @@ metadata:
   labels:
     # Lets HTTPRoutes in this namespace attach to the shared public Gateway.
     gateway-access: public
-    # Enforce the baseline Pod Security standard, warn on anything short of restricted.
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/warn: restricted
+    # Every pod here (app, prober, MongoDB, MinIO, exporter) meets the strictest
+    # Pod Security standard, so enforce it: a pod that doesn't is rejected.
+    pod-security.kubernetes.io/enforce: restricted
