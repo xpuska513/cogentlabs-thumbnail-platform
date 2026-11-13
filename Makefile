@@ -24,7 +24,7 @@ TAG ?= $(shell git rev-parse --short HEAD:app 2>/dev/null || echo dev)$(shell gi
 HELM_UPGRADE_FLAGS := --wait $(shell helm version --short 2>/dev/null | grep -q '^v3' && echo --atomic || echo --rollback-on-failure --force-conflicts)
 
 .DEFAULT_GOAL := help
-.PHONY: help up cluster platform namespaces monitoring tracing gateway deps build deploy rollback test \
+.PHONY: help up cluster platform namespaces crds monitoring tracing gateway deps build deploy rollback test backup restore \
 	status alerts grafana prometheus alertmanager jaeger down
 
 help: ## List targets
@@ -36,33 +36,37 @@ cluster: ## Create the kind cluster (skipped if it exists)
 	@kind get clusters 2>/dev/null | grep -qx $(CLUSTER) || kind create cluster --name $(CLUSTER) --config cluster/kind.yaml
 	$(KUBECTL) wait --for=condition=Ready nodes --all --timeout=120s
 
-platform: namespaces monitoring tracing gateway ## Install monitoring, tracing and the gateway
+platform: namespaces crds monitoring tracing gateway ## Install monitoring, tracing and the gateway
 
 namespaces: ## Create namespaces and generate credentials (only once)
 	$(KUBECTL) apply -f deploy/manifests/namespaces.yaml
 	CONTEXT=kind-$(CLUSTER) scripts/create-secrets.sh
 
-monitoring: ## Prometheus, Alertmanager and Grafana
+# All CRDs first, so no component depends on another one's install order.
+# Applied server-side because Helm never upgrades CRDs itself.
+crds: ## CRDs for the Prometheus operator, the Gateway API and Envoy Gateway
 	helm template prometheus-operator-crds oci://ghcr.io/prometheus-community/charts/prometheus-operator-crds \
 	  --version $(PROMETHEUS_OPERATOR_CRDS_VERSION) | $(KUBECTL) apply --server-side --force-conflicts -f - >/dev/null
+	helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version $(ENVOY_GATEWAY_VERSION) \
+	  --set crds.gatewayAPI.enabled=true --set crds.gatewayAPI.channel=standard --set crds.envoyGateway.enabled=true \
+	  | $(KUBECTL) apply --server-side --force-conflicts -f - >/dev/null
+
+monitoring: namespaces crds ## Prometheus, Alertmanager and Grafana
 	$(HELM) upgrade --install kps oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
 	  --version $(KUBE_PROMETHEUS_STACK_VERSION) -n monitoring -f deploy/values/kube-prometheus-stack.yaml \
 	  $(HELM_UPGRADE_FLAGS) --timeout 10m
 
-tracing: ## Jaeger, in memory
+tracing: namespaces crds ## Jaeger, in memory
 	$(KUBECTL) apply -f deploy/manifests/jaeger.yaml
 	$(KUBECTL) rollout status deployment/jaeger -n monitoring --timeout=120s
 
-gateway: ## Envoy Gateway and the shared public Gateway
-	helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version $(ENVOY_GATEWAY_VERSION) \
-	  --set crds.gatewayAPI.enabled=true --set crds.gatewayAPI.channel=standard --set crds.envoyGateway.enabled=true \
-	  | $(KUBECTL) apply --server-side --force-conflicts -f - >/dev/null
+gateway: crds ## Envoy Gateway and the shared public Gateway
 	$(HELM) upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version $(ENVOY_GATEWAY_VERSION) \
 	  -n envoy-gateway-system --create-namespace -f deploy/values/envoy-gateway.yaml $(HELM_UPGRADE_FLAGS) --timeout 5m
 	$(KUBECTL) apply -f deploy/manifests/gateway.yaml
 	$(KUBECTL) wait --for=condition=Programmed gateway/public -n envoy-gateway-system --timeout=180s
 
-deps: ## MongoDB and MinIO (dev stand-ins for managed services), Mongo exporter
+deps: namespaces crds ## MongoDB and MinIO (dev stand-ins for managed services), Mongo exporter
 	$(KUBECTL) apply -f deploy/manifests/mongodb.yaml -f deploy/manifests/minio.yaml
 	$(KUBECTL) rollout status statefulset/mongodb -n $(NAMESPACE) --timeout=180s
 	$(KUBECTL) rollout status statefulset/minio -n $(NAMESPACE) --timeout=180s
@@ -82,6 +86,13 @@ rollback: ## Roll the app back to its previous release
 
 test: ## Smoke test through the gateway: upload, wait, download, check
 	scripts/smoke-test.sh http://localhost:8080
+
+backup: ## Back up MongoDB and the MinIO bucket to backups/<timestamp>/
+	CONTEXT=kind-$(CLUSTER) NAMESPACE=$(NAMESPACE) scripts/data.sh backup
+
+restore: ## Restore a backup: make restore BACKUP=backups/<timestamp>
+	@test -n "$(BACKUP)" || { echo "usage: make restore BACKUP=backups/<timestamp>"; exit 1; }
+	CONTEXT=kind-$(CLUSTER) NAMESPACE=$(NAMESPACE) scripts/data.sh restore $(BACKUP)
 
 status: ## Show the app's pods and every Helm release
 	$(KUBECTL) get pods -n $(NAMESPACE) -o wide
