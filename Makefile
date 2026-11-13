@@ -15,13 +15,21 @@ PROMETHEUS_OPERATOR_CRDS_VERSION := 32.0.2
 MONGODB_EXPORTER_VERSION := 3.23.0
 
 IMAGE := thumbnail-generator
-# The git tree hash of app/: the tag (and the pods) only change when the app does.
-TAG ?= $(shell git rev-parse --short HEAD:app 2>/dev/null || echo dev)$(shell git diff --quiet HEAD -- app 2>/dev/null || echo -dirty)
+# The git tree hash of app/ as it is on disk, uncommitted and new files included
+# (hashed through a scratch copy of the index): the tag, and so the pods, change
+# exactly when the app does. "dev" outside a git checkout.
+TAG ?= $(or $(shell i=$$(mktemp) && cp "$$(git rev-parse --git-path index 2>/dev/null)" "$$i" 2>/dev/null \
+  && GIT_INDEX_FILE="$$i" git add -A app 2>/dev/null && GIT_INDEX_FILE="$$i" git write-tree --prefix=app/ | cut -c1-7; \
+  rm -f "$$i"),dev)
 # Roll back by itself if an upgrade fails. Helm 4 renamed --atomic and applies
 # server-side; it creates objects that an upgrade adds with a plain update, so
-# the next upgrade conflicts with Helm's own earlier write. Helm owns these
-# objects, so it may force.
-HELM_UPGRADE_FLAGS := --wait $(shell helm version --short 2>/dev/null | grep -q '^v3' && echo --atomic || echo --rollback-on-failure --force-conflicts)
+# the next upgrade (or rollback) conflicts with Helm's own earlier write. Helm
+# owns these objects, so it may force. Server-side is set explicitly: Helm 4
+# otherwise keeps the method a release was installed with, and on a release
+# Helm 3 installed it then rejects --force-conflicts.
+HELM3 := $(shell helm version --short 2>/dev/null | grep -q '^v3' && echo yes)
+HELM_UPGRADE_FLAGS := --wait $(if $(HELM3),--atomic,--rollback-on-failure --server-side=true --force-conflicts)
+HELM_ROLLBACK_FLAGS := --wait $(if $(HELM3),,--server-side=true --force-conflicts)
 
 .DEFAULT_GOAL := help
 .PHONY: help up cluster platform namespaces crds monitoring tracing gateway deps build deploy rollback test backup restore \
@@ -88,8 +96,16 @@ deploy: build ## Install or update the app (rolls back by itself if the rollout 
 	$(HELM) upgrade --install thumbnail charts/thumbnail -n $(NAMESPACE) \
 	  --set image.repository=$(IMAGE) --set image.tag=$(TAG) $(HELM_UPGRADE_FLAGS) --timeout 5m
 
-rollback: ## Roll the app back to its previous release
-	$(HELM) rollback thumbnail -n $(NAMESPACE) --wait
+# Plain `helm rollback` goes to the previous revision, which after a failed
+# deploy (already rolled back by itself) is the failed one. Default to the
+# newest earlier revision that went out fine: superseded, and not "... failed"
+# (Helm marks a failed upgrade superseded too once it has rolled it back).
+# REVISION=<n> from `helm history` overrides.
+REVISION ?= $(shell $(HELM) history thumbnail -n $(NAMESPACE) -o yaml 2>/dev/null | awk '/^- /{r=""; bad=0} \
+  /^  description:/{bad=/failed/} /^  revision:/{r=$$2} /^  status: superseded/{if (r != "" && !bad) last=r} END{print last}')
+rollback: ## Roll the app back to the last good release before this one (or REVISION=<n>)
+	@[ -n "$(REVISION)" ] || { echo "no earlier release to roll back to" >&2; exit 1; }
+	$(HELM) rollback thumbnail $(REVISION) -n $(NAMESPACE) $(HELM_ROLLBACK_FLAGS) --timeout 5m
 
 test: ## Smoke test through the gateway: upload, wait, download, check
 	scripts/smoke-test.sh http://localhost:8080
