@@ -32,9 +32,16 @@ help: ## List targets
 
 up: cluster platform deps deploy test ## Create everything from scratch (safe to re-run)
 
+# Linux's default of 128 inotify instances per user runs out once this stack is up
+# (Docker Desktop allows 8192). containerd then can't watch new containers for OOM
+# kills: they show as exit 137 and the OOM alert never fires. The limit is read on
+# a node, so it's the kernel Docker actually runs on.
 cluster: ## Create the kind cluster (skipped if it exists)
 	@kind get clusters 2>/dev/null | grep -qx $(CLUSTER) || kind create cluster --name $(CLUSTER) --config cluster/kind.yaml
 	$(KUBECTL) wait --for=condition=Ready nodes --all --timeout=120s
+	@n=$$(docker exec $(CLUSTER)-control-plane cat /proc/sys/fs/inotify/max_user_instances); [ "$$n" -ge 512 ] || { \
+	  echo "fs.inotify.max_user_instances is $$n; this cluster needs 512. Raise it, then run make up again:" >&2; \
+	  echo "  sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288" >&2; exit 1; }
 
 platform: namespaces crds monitoring tracing gateway ## Install monitoring, tracing and the gateway
 

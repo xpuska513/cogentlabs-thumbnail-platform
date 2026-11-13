@@ -20,10 +20,19 @@ nothing. The application in [`app/`](app/) is exactly as delivered; everything e
 
 You need Docker with **at least 6 GB of memory** (8 GB recommended; the whole cluster uses about 5 GB),
 `kind`, `kubectl`, `helm`, `make`, `curl` and `openssl`, and port 8080 free.
-Tested with Docker 28.4, kind 0.32.0, kubectl 1.34, and both Helm 4.0.0 and Helm 3.22.1, on macOS (Apple silicon).
+Tested on macOS (Apple silicon) with Docker 28.4, kind 0.32.0, kubectl 1.34, and both Helm 4.0.0 and Helm 3.22.1,
+and on a fresh Ubuntu 24.04 VM (x86_64, 4 vCPU, 8 GB) with Docker 29.1, kind 0.32.0, kubectl 1.34 and Helm 4.0.0.
+
+**On Linux, raise the inotify limit first.** The default of 128 instances per user runs out once the cluster is
+up, and containerd then stops noticing OOM kills ([details](#what-i-tested)). Docker Desktop already allows 8192.
+`make up` checks it and stops with this command if needed:
 
 ```sh
-make up        # cluster, platform, MongoDB and MinIO, app, then a smoke test (about 4 minutes)
+sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288
+```
+
+```sh
+make up        # cluster, platform, MongoDB and MinIO, app, then a smoke test (4 to 7 minutes)
 make help      # every target
 make down      # delete everything
 ```
@@ -203,6 +212,7 @@ Each test was run on the kind cluster with the prober running; numbers are measu
 | Upload over 10 MiB / 5 MB | 413 from the gateway / accepted |
 | A 256-megapixel PNG (729 KiB file, 732 MiB decoded) | Thumbnail in under 10 s, worker memory 57 MiB: libvips streams PNG decoding |
 | `make down && make up` | 220 s from nothing to a passing smoke test (Helm 4.0.0); 210 s with Helm 3.22.1 |
+| `make up` on a fresh Ubuntu 24.04 VM (x86_64, Docker 29.1) | Passed in 392 s, downloading every image. But it ran out of inotify instances; see below |
 | Disaster recovery: `make backup`, `make down`, `make up`, `make restore` | Backup 3 s, rebuild 210 s, restore 4 s. A thumbnail made before the cluster was deleted downloaded again |
 | Enforce the restricted Pod Security standard | A server-side dry run found no violating pod; enforced, and pods are still admitted |
 
@@ -213,6 +223,12 @@ The tests also found problems in my own setup, all fixed:
   working cluster they were already there. All CRDs now go in first.
 - The first restore got MinIO OOM-killed: `mc pipe` buffers 528 MiB by default and ran inside MinIO's container.
   `ThumbnailContainerOOMKilled` fired a minute later. The copy now runs in its own pod with a 16 MiB part size.
+- On Linux the cluster needs 150 inotify instances, and the kernel allows 128 per user by default (Docker Desktop
+  allows 8192, so the Mac never showed it). Nothing visibly broke, but containerd couldn't watch the containers
+  started after that for OOM kills ("failed to watch oom events", 45 times during one install). A test pod killed
+  for memory showed as `Error`, exit 137, instead of `OOMKilled`, so `ThumbnailContainerOOMKilled` would never
+  have fired. `make up` now checks the limit and stops with the fix; with the limit at 512, the same pod showed
+  `OOMKilled`.
 
 ## Trade-offs and operational concerns
 
@@ -299,8 +315,8 @@ page cache got it OOM-killed.
 ## Disaster recovery
 
 **Everything except data is in git.** `make up` rebuilds the cluster, platform, dependencies and app from nothing
-in about 4 minutes (210-220 s measured, with images in Docker's cache; a first run also downloads a few GB of
-images). Credentials are generated fresh, so nothing secret has to be restored.
+in 4 to 7 minutes (210-220 s measured on a Mac with Docker's cache warm, 392 s on a fresh Linux VM that downloaded
+everything). Credentials are generated fresh, so nothing secret has to be restored.
 
 **Data** is MongoDB (jobs and the queue) and MinIO (originals and thumbnails). On kind both live inside the node
 containers, so `make down` deletes them. [`scripts/data.sh`](scripts/data.sh) backs them up and restores them:
