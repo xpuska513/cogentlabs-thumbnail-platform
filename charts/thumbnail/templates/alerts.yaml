@@ -16,6 +16,10 @@ spec:
           expr: |
             sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}", result="success"}[5m]))
             / sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}"}[5m]))
+        - record: thumbnail:probe_success:ratio_rate1h
+          expr: |
+            sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}", result="success"}[1h]))
+            / sum(rate(thumbnail_probe_runs_total{namespace="{{ .Release.Namespace }}"}[1h]))
         # End to end latency: share of prober runs done within 10 s (target 95%).
         # Prometheus 3 stores bucket bounds as floats ("10.0"), older versions as exposed.
         - record: thumbnail:probe_fast:ratio_rate15m
@@ -63,6 +67,19 @@ spec:
             summary: Thumbnails are not being produced (prober failing at {{ "{{ $labels.result }}" }})
             description: The synthetic upload failed {{ "{{ $value | printf \"%.0f\" }}" }} times in 5 minutes at the {{ "{{ $labels.result }}" }} stage.
             runbook_url: {{ $runbook }}#thumbnailprobefailing
+        # Fast burn of the 99% end-to-end target, failures at any stage counted
+        # together (ThumbnailProbeFailing needs 3 at one stage): at 14.4x the
+        # allowed rate, 2% of a 30-day budget is gone in an hour.
+        - alert: ThumbnailProbeErrorBudgetBurn
+          expr: |
+            (1 - thumbnail:probe_success:ratio_rate5m) > (14.4 * 0.01)
+            and
+            (1 - thumbnail:probe_success:ratio_rate1h) > (14.4 * 0.01)
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ "{{ $value | humanizePercentage }}" }} of synthetic uploads fail end to end (target: 99% succeed)"
+            runbook_url: {{ $runbook }}#thumbnailprobeerrorbudgetburn
         - alert: ThumbnailProbeSlow
           expr: thumbnail:probe_duration_seconds:p95_rate15m > 10
           for: 15m
@@ -71,6 +88,7 @@ spec:
           annotations:
             summary: Thumbnails take longer than 10 s (p95 {{ "{{ $value | humanizeDuration }}" }})
             runbook_url: {{ $runbook }}#thumbnailprobeslow
+        {{- if .Values.prober.enabled }}
         - alert: ThumbnailProberDown
           expr: absent(up{namespace="{{ .Release.Namespace }}", component="prober"} == 1)
           for: 5m
@@ -79,6 +97,7 @@ spec:
           annotations:
             summary: The synthetic prober is not reporting, so end-to-end failures would go unnoticed
             runbook_url: {{ $runbook }}#thumbnailproberdown
+        {{- end }}
 
         # --- Edge and API ---------------------------------------------------
         # Fast burn of the 99.5% availability target: at 14.4x the allowed error
@@ -102,27 +121,53 @@ spec:
           annotations:
             summary: API p95 latency is {{ "{{ $value | humanizeDuration }}" }} (target under 500 ms)
             runbook_url: {{ $runbook }}#thumbnailapislow
+        # Failed writes to MinIO per pod. Network errors carry error_type; MinIO's
+        # own HTTP errors (403, 404 NoSuchBucket, 5xx such as a full disk) carry
+        # only the status code. 409 is excluded: the worker gets one at every start
+        # when it creates the bucket that already exists.
+        - record: thumbnail:storage_write_errors:total
+          expr: |
+            sum by (namespace, component, pod) (
+              http_client_request_duration_count{namespace="{{ .Release.Namespace }}", server_address="{{ .Values.minio.endpoint }}", http_request_method="PUT", error_type!=""}
+              or
+              http_client_request_duration_count{namespace="{{ .Release.Namespace }}", server_address="{{ .Values.minio.endpoint }}", http_request_method="PUT", http_response_status_code=~"[45]..", http_response_status_code!="409"}
+            )
         # The app hides these: the API answers 200 before the upload is stored,
         # and the worker marks a job complete even if saving the thumbnail failed.
+        # A pod's first failure creates its series, which increase() can't count
+        # (it needs two samples), so a series that is new in the last 5 minutes
+        # counts too.
         - alert: ThumbnailStorageWritesFailing
           expr: |
-            sum by (component) (increase(http_client_request_duration_count{namespace="{{ .Release.Namespace }}", server_address="{{ .Values.minio.endpoint }}", http_request_method="PUT", error_type!=""}[5m])) > 0
+            sum by (component) (increase(thumbnail:storage_write_errors:total[5m])) > 0
+            or
+            count by (component) (thumbnail:storage_write_errors:total unless thumbnail:storage_write_errors:total offset 5m)
           labels:
             severity: critical
           annotations:
             summary: Writes to object storage are failing from the {{ "{{ $labels.component }}" }}
             description: >-
-              The {{ "{{ $labels.component }}" }} failed {{ "{{ $value | printf \"%.0f\" }}" }} uploads to MinIO in 5 minutes.
+              The {{ "{{ $labels.component }}" }} has failed uploads to MinIO in the last 5 minutes.
               From the API this means uploads were accepted (200) but not stored;
               from the worker, jobs were marked complete without a thumbnail.
             runbook_url: {{ $runbook }}#thumbnailstoragewritesfailing
 
         # --- Pods -------------------------------------------------------------
+        # Init containers have their own metrics; the OpenTelemetry copy has been
+        # OOM-killed before.
         - alert: ThumbnailContainerOOMKilled
           expr: |
-            increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
-            and on (namespace, pod, container)
-            kube_pod_container_status_last_terminated_reason{namespace="{{ .Release.Namespace }}", reason="OOMKilled"} == 1
+            (
+              increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+              and on (namespace, pod, container)
+              kube_pod_container_status_last_terminated_reason{namespace="{{ .Release.Namespace }}", reason="OOMKilled"} == 1
+            )
+            or
+            (
+              increase(kube_pod_init_container_status_restarts_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+              and on (namespace, pod, container)
+              kube_pod_init_container_status_last_terminated_reason{namespace="{{ .Release.Namespace }}", reason="OOMKilled"} == 1
+            )
           labels:
             severity: warning
           annotations:

@@ -1005,8 +1005,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Failed calls to MinIO",
-      "description": "The app hides these: the API returns 200 before storing the upload, and the worker marks jobs complete even if the thumbnail wasn't saved.",
+      "title": "Failed writes to MinIO",
+      "description": "Uploads (API) and thumbnails (worker) that MinIO didn't store, from network errors or MinIO's own 4xx/5xx. The app hides these: the API returns 200 before storing the upload, and the worker marks jobs complete even if the thumbnail wasn't saved.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1023,7 +1023,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum by (component) (rate(http_client_request_duration_count{namespace=\"thumbnail\", server_address=\"minio\", error_type!=\"\"}[$__rate_interval]))) or (sum by (component) (rate(http_client_request_duration_count{namespace=\"thumbnail\", server_address=\"minio\"}[$__rate_interval])) * 0)",
+          "expr": "(sum by (component) (rate(thumbnail:storage_write_errors:total{namespace=\"thumbnail\"}[$__rate_interval]))) or (sum by (component) (rate(http_client_request_duration_count{namespace=\"thumbnail\", server_address=\"minio\"}[$__rate_interval])) * 0)",
           "legendFormat": "{{component}}",
           "refId": "A"
         }
