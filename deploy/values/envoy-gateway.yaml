@@ -1,5 +1,5 @@
 # Envoy Gateway controller.
-# CRDs are applied separately by `make gateway` (standard Gateway API channel).
+# CRDs are applied separately by `make crds` (standard Gateway API channel).
 crds:
   enabled: false
 

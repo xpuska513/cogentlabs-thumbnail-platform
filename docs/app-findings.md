@@ -38,22 +38,23 @@ in the README, with the change that lets us remove it.
 | 16 | **Uploads have no size limit** and are held in memory. The gateway now rejects uploads over 10 MiB. A 256-megapixel PNG (729 KiB file) was processed fine in under 10 s at 57 MiB, because libvips streams PNG decoding. | `src/middleware.ts:5-21` | Tested | `limits.fileSize` in multer; an explicit `limitInputPixels` in sharp. |
 | 17 | **Nothing is ever deleted**: originals, thumbnails, job records and Agenda jobs. Storage only grows. | whole app | Tested | Retention: a bucket lifecycle rule and a TTL index on job records. |
 | 18 | **Without a database name in the URL the app uses `test`.** The platform sets `/thumbnails` in the connection string. | `src/database.ts:11` | Tested | Document it, or require a name. |
+| 19 | **Object keys come from the client's filename.** A key is the job id plus whatever follows the last dot in the uploaded file's name, and the upload filter checks only the MIME type the client claims. A file named `IMG 1` was stored as `<id>.IMG 1`; `a./b` would become `<id>./b`, a key with a slash in it. | `src/controllers/thumbnail.ts:29-30`, `src/middleware.ts:9-13` | Tested | Take the extension from the detected image type (sharp's metadata), not from the name. |
 
 ## Observability
 
 | # | Finding | How found | Fix |
 |---|---|---|---|
-| 19 | **No metrics and no traces.** The platform injects OpenTelemetry auto-instrumentation, which gives per-route API metrics and request traces, but nothing for jobs: no span per job, no queue metrics. | Tested | Expose queue length, oldest waiting job, job duration and failures by reason; carry `traceparent` in the job data so a trace connects the upload to its processing. |
-| 20 | **Logs are thin.** No request log (a successful request writes nothing), plain text without timestamps or levels, multi-line stack traces. A client asking for an unfinished job's image produces a 10-line error stack trace. With MongoDB down the worker logs nothing at all. | Tested | JSON logs with level and request or job id; no stack traces for client mistakes. |
+| 20 | **No metrics and no traces.** The platform injects OpenTelemetry auto-instrumentation, which gives per-route API metrics and request traces, but nothing for jobs: no span per job, no queue metrics. | Tested | Expose queue length, oldest waiting job, job duration and failures by reason; carry `traceparent` in the job data so a trace connects the upload to its processing. |
+| 21 | **Logs are thin.** No request log (a successful request writes nothing), plain text without timestamps or levels, multi-line stack traces. A client asking for an unfinished job's image produces a 10-line error stack trace. With MongoDB down the worker logs nothing at all. | Tested | JSON logs with level and request or job id; no stack traces for client mistakes. |
 
 ## Build and dependencies
 
 | # | Finding | Where | Fix |
 |---|---|---|---|
-| 21 | **Node.js 20 reached end of life in April 2026.** Current OpenTelemetry releases need Node 22.15+, which is why the platform pins an older instrumentation image. | `Dockerfile:1` | Node 22 or 24 LTS. |
-| 22 | **`npm audit` of production dependencies: 19 known vulnerabilities, 1 critical and 10 high**, including direct dependencies express 4.17.1, multer 1.4.2 and sharp 0.29.0. | `package.json` | Upgrade; scan in CI. |
-| 23 | **The image ships dev dependencies, tests and TypeScript sources** (235 MB of `node_modules`, 526 packages) and runs as root. The platform runs it as uid 1000 with a read-only filesystem. | `Dockerfile` | Multi-stage build: compile, then copy `dist` and production dependencies only; `USER node`. |
-| 24 | **`npm start` as the entrypoint.** npm becomes PID 1: it loads `NODE_OPTIONS` too and logs errors on every stop. The platform runs `node dist/index.js`. | `Dockerfile:13` | `CMD ["node", "dist/index.js"]`. |
+| 22 | **Node.js 20 reached end of life in April 2026.** Current OpenTelemetry releases need Node 22.15+, which is why the platform pins an older instrumentation image. | `Dockerfile:1` | Node 22 or 24 LTS. |
+| 23 | **`npm audit` of production dependencies: 19 known vulnerabilities, 1 critical and 10 high**, including direct dependencies express 4.17.1, multer 1.4.2 and sharp 0.29.0. | `package.json` | Upgrade; scan in CI. |
+| 24 | **The image ships dev dependencies, tests and TypeScript sources** (235 MB of `node_modules`, 526 packages) and runs as root. The platform runs it as uid 1000 with a read-only filesystem. | `Dockerfile` | Multi-stage build: compile, then copy `dist` and production dependencies only; `USER node`. |
+| 25 | **`npm start` as the entrypoint.** npm becomes PID 1: it loads `NODE_OPTIONS` too and logs errors on every stop. The platform runs `node dist/index.js`. | `Dockerfile:13` | `CMD ["node", "dist/index.js"]`. |
 
 ---
 

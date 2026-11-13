@@ -100,10 +100,12 @@ docs/                 runbooks, findings for the app team
 
 ## Operating it
 
-**Deploy a change.** `make deploy` builds the image, tags it with the git tree hash of `app/` (the pods only
-roll when the app changes), loads it into kind and runs `helm upgrade`. The rollout replaces one pod at a time
-and never goes below the current capacity; if the new pods don't become ready, Helm rolls back by itself.
-`make rollback` returns to the previous release.
+**Deploy a change.** `make deploy` builds the image, tags it with the git tree hash of `app/` as it is on disk,
+uncommitted changes included (so the pods roll exactly when the app changes), loads it into kind and runs
+`helm upgrade`. The rollout replaces one pod at a time and never goes below the current capacity; if the new pods
+don't become ready, Helm rolls back by itself. `make rollback` returns to the last release that went out fine
+before the current one, or `REVISION=<n>` from `helm history`. Plain `helm rollback` would pick the previous
+revision, which after a failed deploy is the failed one.
 
 **Scale.** Set `api.replicas` / `worker.replicas` in [`values.yaml`](charts/thumbnail/values.yaml) and `make deploy`.
 
@@ -175,13 +177,14 @@ Defined in [`alerts.yaml`](charts/thumbnail/templates/alerts.yaml), each linking
 
 | Alert | Fires when | Severity |
 |---|---|---|
-| ThumbnailProbeFailing | 3 prober failures in 5 min; labelled with the stage that failed | critical |
+| ThumbnailProbeFailing | 3 prober failures at one stage in 5 min; labelled with that stage | critical |
+| ThumbnailProbeErrorBudgetBurn | Prober failures at any stage over 14.4× the 1% budget, over both 5 min and 1 h | critical |
 | ThumbnailProbeSlow | p95 upload-to-thumbnail time over 10 s for 15 min | warning |
 | ThumbnailProberDown | No prober metrics for 5 min | warning |
 | ThumbnailApiErrorBudgetBurn | Gateway 5xx ratio over 14.4× the 0.5% budget, over both 5 min and 1 h | critical |
 | ThumbnailApiSlow | API p95 over 500 ms for 10 min | warning |
-| ThumbnailStorageWritesFailing | Failed writes to MinIO from the API (upload lost behind a 200) or the worker (job "complete" without a thumbnail) | critical |
-| ThumbnailContainerOOMKilled | A container killed for exceeding its memory limit | warning |
+| ThumbnailStorageWritesFailing | Failed writes to MinIO from the API (upload lost behind a 200) or the worker (job "complete" without a thumbnail), from the first one on, network errors and MinIO's own 4xx/5xx alike | critical |
+| ThumbnailContainerOOMKilled | A container or init container killed for exceeding its memory limit | warning |
 | ThumbnailMongoDown / ThumbnailMinioDown | A dependency unreachable or gone for 1 min | critical |
 | ThumbnailStorageLow | Under 20% free space for MinIO | warning |
 
@@ -208,12 +211,14 @@ Each test was run on the kind cluster with the prober running; numbers are measu
 | Delete an API pod | No prober failures, 0 gateway 5xx |
 | Stop MinIO | Uploads still answered 200 (app defect). `ThumbnailStorageWritesFailing` fired after 62 s, `ThumbnailProbeFailing` with stage `processing`. A worker restarted during the outage waited in its init container ("waiting for MinIO: ECONNREFUSED") and started 8 s after MinIO returned. This test also showed `ThumbnailMinioDown` never fired, because a pod that's gone has no `up` series at all; fixed with `absent()` |
 | Stop MongoDB | Requests got a 504 after the 10 s gateway timeout instead of hanging 30 s. `ThumbnailMongoDown` fired at 86 s, `ThumbnailProbeFailing` at 117 s. The API crash-looped; workers stayed up and silent. After MongoDB returned (2 s), the API took **318 s** to answer again because of Kubernetes' restart back-off. Data intact |
-| Scale workers to zero | Only `ThumbnailProbeFailing` (stage `processing_timeout`) fired, at 153 s: nothing crashed, so no other signal could see it |
+| Scale workers to zero | Nothing crashed, so only the prober could see it. `ThumbnailProbeFailing` (stage `processing_timeout`) fired at 153 s (155 s on a retest); `ThumbnailProbeErrorBudgetBurn` at 124 s, on a cluster with minutes of history (with an hour of successful runs it needs about 9 minutes) |
 | Upload over 10 MiB / 5 MB | 413 from the gateway / accepted |
 | A 256-megapixel PNG (729 KiB file, 732 MiB decoded) | Thumbnail in under 10 s, worker memory 57 MiB: libvips streams PNG decoding |
 | `make down && make up` | 220 s from nothing to a passing smoke test (Helm 4.0.0); 210 s with Helm 3.22.1 |
 | `make up` on a fresh Ubuntu 24.04 VM (x86_64, Docker 29.1) | Passed in 392 s, downloading every image. But it ran out of inotify instances; see below |
-| Disaster recovery: `make backup`, `make down`, `make up`, `make restore` | Backup 3 s, rebuild 210 s, restore 4 s. A thumbnail made before the cluster was deleted downloaded again |
+| Disaster recovery: `make backup`, `make down`, `make up`, `make restore` | Backup 8 s (1,373 objects), rebuild 212 s, restore 13 s. Two thumbnails made before the cluster was deleted downloaded again, one stored under a key with a space in it |
+| One upload into a deleted bucket, prober paused | Answered 200 (app defect). `ThumbnailStorageWritesFailing` fired after 53 s; its earlier version never would have |
+| Two different uncommitted app changes, `make deploy` after each, then `make rollback` | Two image tags, pods rolled both times, the prober untouched. The rollback returned to the first change's release |
 | Enforce the restricted Pod Security standard | A server-side dry run found no violating pod; enforced, and pods are still admitted |
 
 The tests also found problems in my own setup, all fixed:
@@ -222,13 +227,29 @@ The tests also found problems in my own setup, all fixed:
 - A clean `make up` failed: Jaeger's manifest needed the Gateway API's CRDs, which a later step installed. On my
   working cluster they were already there. All CRDs now go in first.
 - The first restore got MinIO OOM-killed: `mc pipe` buffers 528 MiB by default and ran inside MinIO's container.
-  `ThumbnailContainerOOMKilled` fired a minute later. The copy now runs in its own pod with a 16 MiB part size.
+  `ThumbnailContainerOOMKilled` fired a minute later. The copy now runs in its own pod, with its own memory limit.
 - On Linux the cluster needs 150 inotify instances, and the kernel allows 128 per user by default (Docker Desktop
   allows 8192, so the Mac never showed it). Nothing visibly broke, but containerd couldn't watch the containers
   started after that for OOM kills ("failed to watch oom events", 45 times during one install). A test pod killed
   for memory showed as `Error`, exit 137, instead of `OOMKilled`, so `ThumbnailContainerOOMKilled` would never
   have fired. `make up` now checks the limit and stops with the fix; with the limit at 512, the same pod showed
   `OOMKilled`.
+- Upgrading with Helm 4 a cluster that Helm 3 had set up failed: Helm 4 keeps a release's original (client-side)
+  apply method and then refuses `--force-conflicts`. The Makefile now sets `--server-side=true`.
+
+A review of the finished setup found more, all fixed and retested:
+- A second uncommitted app change reused the first one's image tag, so `make deploy` didn't roll the pods. The
+  tag now hashes `app/` as it is on disk.
+- `ThumbnailStorageWritesFailing` missed a pod's first failed write (`increase()` can't count a counter's first
+  sample) and MinIO's own HTTP errors, which carry only a status code. It caught the MinIO outage only because
+  that produced many errors; a single lost upload went unnoticed.
+- `make backup` could report success with no images if listing the bucket failed, and it copied one object per
+  `kubectl exec`, getting slower every day the prober runs. It now streams one `tar` and stops on any error.
+- `make rollback` went to the previous revision, which after a failed deploy is the failed one.
+- Smaller ones: the prober restarted on every deploy, so it was blind during the rollout; PodDisruptionBudgets
+  would have blocked node drains while the API crash-looped; MinIO's two scrapes wrote one `up` series; init
+  containers' OOM kills didn't alert; a runbook command never matched; and no alert covered the 99% end-to-end
+  target when failures were spread across stages.
 
 ## Trade-offs and operational concerns
 
@@ -255,7 +276,8 @@ Agenda's 10-minute lock expires. Only the app can fix that, by handling SIGTERM.
 They run as single instances on local volumes: if their node dies, they stay down until it returns. That's
 acceptable for development and the reason they're outside the app chart. The chart only needs a connection string
 and an S3 endpoint, so the same chart runs against MongoDB Atlas or DocumentDB and S3 in the cloud, or against
-operator-run replicated MongoDB and object storage on-prem. I avoided the Bitnami charts (Bitnami withdrew most
+operator-run replicated MongoDB and object storage on-prem. Its two dependency-down alerts watch the in-cluster
+exporter and MinIO, though; against managed services they'd fire forever and should give way to the provider's. I avoided the Bitnami charts (Bitnami withdrew most
 of its free images in 2025) and MinIO's operator (too much for a stand-in). The MinIO image is a community build,
 the same one the app's docker-compose uses, since MinIO stopped publishing free images.
 
@@ -267,9 +289,12 @@ Ingress is frozen upstream and ingress-nginx was retired in March 2026, so routi
 The platform owns a shared Gateway that accepts routes only from namespaces labelled for it; the app ships its
 own HTTPRoute, with a request timeout that is standard Gateway API. Two settings are specific to Envoy Gateway,
 and both are marked in the files: the upload cap (a `BackendTrafficPolicy`) and the gateway's own telemetry.
+The cap works by buffering each upload whole in Envoy, so at 256 MiB per Envoy pod about 20 maximum-size uploads
+at once would run it out of memory: raise its memory with real traffic, or move the limit into the app.
 
 It costs more than a single ingress controller: a controller, two Envoy pods and 18 CRDs. CRDs come from the
-standard channel, which is safe next to CRDs a cloud provider already manages.
+standard channel. On a cluster whose provider already installs the Gateway API CRDs, leave them out of
+`make crds`: it applies with `--force-conflicts` and would take them over.
 
 On kind, the gateway's NodePort uses `externalTrafficPolicy: Cluster`: kind publishes port 8080 only on the
 control-plane node, which runs no Envoy. That loses the client's IP address; in the cloud the default `Local`
@@ -303,6 +328,8 @@ page cache got it OOM-killed.
   is the fast signal.
 - **Helm 4.** It applies changes server-side, and an object added by one upgrade conflicts with Helm's own write on
   the next. The Makefile passes `--force-conflicts` on Helm 4 (Helm owns these objects) and `--atomic` on Helm 3.
+  It also sets `--server-side=true`: Helm 4 otherwise keeps the method a release was installed with, so on a
+  cluster set up with Helm 3 it refused the upgrade.
 - **Everything targets the kind context explicitly** (`--context kind-thumbnail`), so no command can touch another
   cluster that happens to be current.
 - **Resources come from measurements**: the app's limits from load tests (the worker resizes 5 images at once and
@@ -330,8 +357,10 @@ To recover from a lost cluster: `make up`, then `make restore`. Tested end to en
 the cluster was deleted downloaded again after the restore.
 
 - Backups land in `backups/` (ignored by git) on the machine running `make`; copy them somewhere else.
-- The MongoDB dump runs inside the MongoDB pod as the app's own user. MinIO objects are copied one by one from a
-  throwaway pod, because the MinIO image has no `tar`: fine for this volume, far too slow for a real bucket.
+- The MongoDB dump runs inside the MongoDB pod as the app's own user. The bucket moves as one `tar` stream
+  through a throwaway pod (busybox, with `mc` copied in from the MinIO image, which has no `tar`). Any failure
+  stops the script, so a backup can't come out silently empty. For a real bucket, use the provider's
+  replication or versioning instead of copying through `kubectl`.
 - Recovery point is the last backup: anything uploaded after it is lost, and clients would upload again. The
   dump is taken before the objects, so every job in the dump has its files in the backup.
 
@@ -340,7 +369,7 @@ the cluster was deleted downloaded again after the restore.
 ### Autoscaling
 
 - **API:** a HorizontalPodAutoscaler on CPU is enough for this app (requests are short; uploads are buffered at
-  the gateway). Per-pod request rate from Envoy, through KEDA's Prometheus scaler, is the better signal if CPU
+  the gateway). It needs metrics-server, which kind doesn't include: one more chart in `make platform`. Per-pod request rate from Envoy, through KEDA's Prometheus scaler, is the better signal if CPU
   stays flat while latency grows.
 - **Workers:** KEDA's MongoDB scaler on jobs waiting in the `agenda` collection
   (`{nextRunAt: {$lte: now}, lockedAt: null}`), sized as waiting jobs ÷ 5 (Agenda's concurrency per worker).

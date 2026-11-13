@@ -24,7 +24,8 @@ Each access-log line has a `trace_id` you can open in Jaeger (`make jaeger`).
 
 ## ThumbnailProbeFailing
 
-**Meaning.** The synthetic upload failed at least 3 times in 5 minutes. The `result` label says where:
+**Meaning.** The synthetic upload failed at least 3 times at the same stage in 5 minutes. The `result` label
+says where:
 
 | result | Where it broke | Look at |
 |---|---|---|
@@ -44,6 +45,17 @@ make alerts                                                   # what else is fir
 
 **Fix.** Follow the stage. Workers stuck in `Init` print what they are waiting for:
 `kubectl -n thumbnail logs <worker-pod> -c wait-for-deps`.
+
+## ThumbnailProbeErrorBudgetBurn
+
+**Meaning.** More than 14.4% of synthetic uploads failed over both the last 5 minutes and the last hour, at any
+mix of stages: at that rate the monthly 99% budget lasts about two days. It catches failures spread across
+stages, which `ThumbnailProbeFailing` (3 at one stage) can miss.
+
+**Check.** Which stages fail, from the prober's own log, then follow them as in `ThumbnailProbeFailing`:
+```sh
+kubectl -n thumbnail logs deploy/thumbnail-prober --tail=120 | grep -v '"result":"success"'
+```
 
 ## ThumbnailProbeSlow
 
@@ -73,7 +85,7 @@ instead of about ten, so the 1-hour ratio climbs slowly. `ThumbnailProbeFailing`
 
 **Check.** Status codes in the Envoy access log:
 ```sh
-kubectl -n envoy-gateway-system logs -l app.kubernetes.io/component=proxy -c envoy --tail=50 | grep '"status":"5'
+kubectl -n envoy-gateway-system logs -l app.kubernetes.io/component=proxy -c envoy --tail=50 | grep '"status":5'
 ```
 - `503` with flags `UH` or `UF`: no healthy API pod. Check API pods and restarts.
 - `503` with flag `UC`: an API pod died mid-request; it crashes on a MongoDB error (see `ThumbnailMongoDown`).

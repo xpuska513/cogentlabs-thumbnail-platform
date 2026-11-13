@@ -1,7 +1,7 @@
 # kube-prometheus-stack, trimmed for a kind cluster.
 fullnameOverride: kps
 
-# CRDs are applied separately by `make monitoring` (Helm never upgrades CRDs),
+# CRDs are applied separately by `make crds` (Helm never upgrades CRDs),
 # so chart upgrades and CRD upgrades are both explicit and repeatable.
 crds:
   enabled: false
