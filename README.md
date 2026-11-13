@@ -168,8 +168,8 @@ complete when the thumbnail wasn't saved, and answers 400 to everything else, so
 whether users get thumbnails. Only doing what a user does, uploading and downloading, can. 4xx are left out of
 availability for the same reason: the app's 400s can't be told apart from client mistakes.
 
-The prober goes through the public gateway, so it also tests the route, the gateway and its timeout. It waits
-one interval after starting, so a fresh install isn't counted as an outage.
+The prober goes through the public gateway, so it also tests the route, the gateway and its timeout. It starts
+once the API answers through the gateway (after 3 minutes at most), so a fresh install isn't counted as an outage.
 
 ### Alerts
 

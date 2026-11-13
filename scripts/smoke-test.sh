@@ -17,12 +17,14 @@ echo "uploaded $IMAGE, job $id"
 
 waited=0
 while :; do
-  status=$(curl -fsS --max-time 5 "$BASE_URL/thumbnail/$id" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')
-  [ "$status" = complete ] && break
-  [ "$status" = failed ] && fail "the job failed"
-  [ "$waited" -lt 30 ] || fail "the job is still '$status' after 30s"
+  # Check after a second: the API answers before it has saved the job, so an
+  # immediate check can get "not found" (a 400) for a job that exists.
   sleep 1
   waited=$((waited + 1))
+  status=$(curl -fs --max-time 5 "$BASE_URL/thumbnail/$id" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')
+  [ "$status" = complete ] && break
+  [ "$status" = failed ] && fail "the job failed"
+  [ "$waited" -lt 30 ] || fail "the job is still '${status:-not found}' after 30s"
 done
 
 curl -fsS --max-time 15 -o "$tmp/thumbnail.png" "$BASE_URL/thumbnail/$id/image" || fail "download failed"

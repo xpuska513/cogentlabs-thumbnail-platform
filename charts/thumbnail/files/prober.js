@@ -52,6 +52,9 @@ async function probe(started) {
   if (!jobId) throw new ProbeError('upload_failed', 'no job_id in the response');
 
   for (;;) {
+    // Wait before each check: the API answers before it has saved the job, so
+    // an immediate check can get "not found" (a 400) for a job that exists.
+    await sleep(500);
     const res = await request('processing_failed', `/thumbnail/${jobId}`);
     const status = (await res.json()).data?.status;
     if (status === 'complete') break;
@@ -59,7 +62,6 @@ async function probe(started) {
     if (Date.now() - started > timeoutMs) {
       throw new ProbeError('processing_timeout', `job ${jobId} still '${status}' after ${timeoutMs / 1000}s`);
     }
-    await sleep(500);
   }
 
   const res = await request('download_failed', `/thumbnail/${jobId}/image`);
@@ -107,9 +109,19 @@ http.createServer((req, res) => {
 }).listen(9090);
 
 (async () => {
-  // First run after one interval, so the minute the API takes to start on a
-  // fresh install isn't counted as an outage.
-  await sleep(intervalMs);
+  // Start once the API answers through the gateway, so a fresh install isn't
+  // counted as an outage (a fixed delay was too short on a slower machine: its
+  // 503s fired the error-budget alerts). After 3 minutes runs count anyway, so
+  // an app that never comes up still alerts.
+  const startBy = Date.now() + 180_000;
+  while (Date.now() < startBy) {
+    try {
+      if ((await fetch(target + '/', { signal: AbortSignal.timeout(5_000) })).ok) break;
+    } catch {
+      // not reachable yet
+    }
+    await sleep(2_000);
+  }
   for (;;) {
     const started = Date.now();
     let result = 'success';
